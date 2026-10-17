@@ -1,0 +1,92 @@
+# Experimental unsigned iOS build for EspressU. No Apple signing secrets or certificates.
+# Run only in a personal fork, after reviewing source and dependencies.
+name: EspressU - eigener iPhone-Build (experimentell)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - name: Quellcode der Release-Version auschecken
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build-Werkzeuge installieren
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          brew install cmake ninja xcodegen pkg-config autoconf automake libtool
+          xcodebuild -downloadComponent metalToolchain
+
+      - name: StikJIT aus Projektquellen bauen
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f ci/build-stikjit.sh
+          bash ci/build-stikjit.sh
+
+      - name: Cemu-Framework fuer iOS bauen
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ios -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DVCPKG_TARGET_TRIPLET=arm64-ios \
+            -DBUILD_HEADLESS_DYLIB=ON \
+            -DCMAKE_MACOSX_BUNDLE=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ios --target CemuBin
+          mkdir -p build-ios/out
+          rm -rf build-ios/out/Cemu.framework
+          cp -R build-ios/src/Cemu.framework build-ios/out/
+
+      - name: EspressU-App ohne Signatur bauen
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src/ios
+          xcodegen generate
+          xcodebuild \
+            -project EspressU.xcodeproj \
+            -scheme EspressU \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath "$GITHUB_WORKSPACE/build-derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Unsignierte IPA verpacken und SHA-256 berechnen
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/build-derived/Build/Products/Release-iphoneos/EspressU.app"
+          test -d "$app"
+          mkdir -p "$GITHUB_WORKSPACE/paket/Payload"
+          cp -R "$app" "$GITHUB_WORKSPACE/paket/Payload/"
+          cd "$GITHUB_WORKSPACE/paket"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/EspressU-selbstgebaut-UNSIGNIERT.ipa"
+          cd "$GITHUB_WORKSPACE"
+          shasum -a 256 EspressU-selbstgebaut-UNSIGNIERT.ipa > SHA256.txt
+
+      - name: Fertige Dateien bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: EspressU-eigener-Build-UNSIGNIERT
+          path: |
+            EspressU-selbstgebaut-UNSIGNIERT.ipa
+            SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
